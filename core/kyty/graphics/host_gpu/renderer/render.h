@@ -216,6 +216,10 @@ public:
 	                                                         const HW::Shader&  shaders,
 	                                                         uint32_t           mode, uint64_t args_addr,
 	                                                         bool               async_compute);
+	[[nodiscard]] ResolvedDraw* ReserveResolvedDraw(const HW::Shader& shaders);
+	void ResolveDrawInto(ResolvedDraw& draw, const HW::Context& context, const HW::UserConfig& user_config,
+	                     const HW::Shader& shaders, const ShaderIndirectOffsets& indirect_offsets,
+	                     bool indirect_draw, uint64_t context_id, uint64_t user_config_id);
 	bool TakeResolvedDispatch(ShaderComputeInputInfo& input_info, const ShaderModule*& module);
 #if defined(ANYPS5_KYTY)
 	void CheckDeferredDraw(CommandBuffer& buffer, const DrawRenderState& state);
@@ -227,6 +231,7 @@ public:
 	}
 	static ResolvedDraw* WaitResolvedDraw(ResolvedDraw* resolved) noexcept;
 	static void ReleaseResolvedDraw(ResolvedDraw* resolved) noexcept;
+	[[nodiscard]] static bool ResolvedDrawWritesBuffers(const ResolvedDraw& resolved);
 	void UseContextId(uint64_t context_id, uint64_t user_config_id = 0) noexcept {
 		m_context_id     = context_id;
 		m_user_config_id = user_config_id;

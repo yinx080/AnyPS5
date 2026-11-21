@@ -501,13 +501,112 @@ void GuestGpu::ExecutionThread() {
 
 static bool IndirectDrawOffsets(IndirectDrawRegisters registers, ShaderIndirectOffsets& offsets);
 
+namespace {
+
+class ResolveHelper {
+public:
+	struct Job {
+		RenderExecutor::ResolvedDraw* draw           = nullptr;
+		const HW::Context*            context        = nullptr;
+		const HW::UserConfig*         user_config    = nullptr;
+		const HW::Shader*             shaders        = nullptr;
+		ShaderIndirectOffsets         offsets        = {};
+		bool                          indirect_draw  = false;
+		uint64_t                      context_id     = 0;
+		uint64_t                      user_config_id = 0;
+		uint64_t                      ahead_writes   = 0;
+	};
+
+	explicit ResolveHelper(RenderExecutor& executor): m_executor(executor) {
+		m_thread = std::jthread([this] { Run(); });
+	}
+	~ResolveHelper() {
+		m_jobs.Stop();
+		m_thread.join();
+	}
+	KYTY_CLASS_NO_COPY(ResolveHelper);
+
+	[[nodiscard]] bool Takes(const HW::Shader& shaders) const {
+		return m_pending.load(std::memory_order_acquire) < MaxPending &&
+		       m_programs[Slot(shaders)] == ProgramsKey(shaders) && !PipelineCache::AheadGuestWritesPending();
+	}
+	void Learn(const HW::Shader& shaders, const RenderExecutor::ResolvedDraw* resolved) {
+		if (resolved != nullptr) {
+			m_programs[Slot(shaders)] = RenderExecutor::ResolvedDrawWritesBuffers(*resolved) ? 0 : ProgramsKey(shaders);
+		}
+	}
+	RenderExecutor::ResolvedDraw* Resolve(const GpuRegisterState& state, const ShaderIndirectOffsets& offsets,
+	                                      bool indirect_draw) {
+		auto* draw = m_executor.ReserveResolvedDraw(*state.shaders);
+		if (draw != nullptr) {
+			m_pending.fetch_add(1, std::memory_order_relaxed);
+			m_jobs.Push({draw, state.context, state.user_config, state.shaders, offsets, indirect_draw,
+			             state.context_id, state.user_config_id, PipelineCache::AheadWritesSequence()});
+		}
+		return draw;
+	}
+
+private:
+	static constexpr uint32_t MaxPending = 2;
+	static constexpr size_t   ProgramSlots = 4096;
+
+	static uint64_t ProgramsKey(const HW::Shader& shaders) {
+		const auto&                   vs = shaders.GetVs();
+		const std::array<uint64_t, 5> programs {vs.es_regs.data_addr, vs.ls_regs.data_addr, vs.hs_regs.data_addr,
+		                                        vs.gs_regs.data_addr, shaders.GetPs().ps_regs.data_addr};
+		return XXH3_64bits(programs.data(), sizeof(programs)) | 1u;
+	}
+	static size_t Slot(const HW::Shader& shaders) {
+		return static_cast<size_t>(ProgramsKey(shaders) >> 20u) & (ProgramSlots - 1);
+	}
+
+	void Run() {
+		KYTY_PROFILER_THREAD("Thread_GpuResolveHelper");
+		Config::ConfigureGpuStageThread(Config::GpuStageThread::ResolveHelper);
+		PipelineCache::BeginAheadThread(1);
+		for (;;) {
+			auto job = m_jobs.TryPop();
+			if (!job) {
+				job = m_jobs.Pop();
+				if (!job) {
+					if (m_jobs.IsStopped()) {
+						break;
+					}
+					continue;
+				}
+			}
+			PipelineCache::SyncAheadWrites(job->ahead_writes);
+			m_executor.ResolveDrawInto(*job->draw, *job->context, *job->user_config, *job->shaders, job->offsets,
+			                           job->indirect_draw, job->context_id, job->user_config_id);
+			m_pending.fetch_sub(1, std::memory_order_release);
+		}
+	}
+
+	RenderExecutor&             m_executor;
+	Common::SpscQueue<Job>      m_jobs {64};
+	std::atomic<uint32_t>       m_pending {0};
+	std::vector<uint64_t>       m_programs = std::vector<uint64_t>(ProgramSlots);
+	std::jthread                m_thread;
+};
+
+}
+
 void GuestGpu::ResolveThread() {
 	KYTY_PROFILER_THREAD("Thread_GpuResolve");
 	Config::ConfigureGpuStageThread(Config::GpuStageThread::Resolve);
 	auto& executor = m_renderer.GetRenderExecutor();
+	std::optional<ResolveHelper> helper;
 #if defined(ANYPS5_KYTY)
-	if (PipelineCache::NarrowProgramLock()) {
+	if (Config::ResolveHelperEnabled() || PipelineCache::NarrowProgramLock()) {
 		PipelineCache::BeginAheadThread(0);
+	}
+	if (Config::ResolveHelperEnabled()) {
+		helper.emplace(executor);
+	}
+#else
+	if (Config::ResolveHelperEnabled()) {
+		PipelineCache::BeginAheadThread(0);
+		helper.emplace(executor);
 	}
 #endif
 	for (;;) {
@@ -559,17 +658,31 @@ void GuestGpu::ResolveThread() {
 		    table_hint == 1u) {
 		} else if (operation->kind == GpuOperationKind::DrawIndex ||
 		           operation->kind == GpuOperationKind::DrawAuto) {
-			operation->resolved =
-			    executor.ResolveDrawAhead(*operation->state.context, *operation->state.user_config,
-			                              *operation->state.shaders, {}, false, operation->state.context_id,
-			                              operation->state.user_config_id);
+			if (helper && helper->Takes(*operation->state.shaders)) {
+				operation->resolved = helper->Resolve(operation->state, {}, false);
+			} else {
+				operation->resolved =
+				    executor.ResolveDrawAhead(*operation->state.context, *operation->state.user_config,
+				                              *operation->state.shaders, {}, false, operation->state.context_id,
+				                              operation->state.user_config_id);
+				if (helper) {
+					helper->Learn(*operation->state.shaders, operation->resolved);
+				}
+			}
 		} else if (operation->kind == GpuOperationKind::DrawIndirect) {
 			ShaderIndirectOffsets offsets;
 			if (IndirectDrawOffsets(operation->draw_indirect.registers, offsets)) {
-				operation->resolved = executor.ResolveDrawAhead(
-				    *operation->state.context, *operation->state.user_config,
-				    *operation->state.shaders, offsets, true, operation->state.context_id,
-				    operation->state.user_config_id);
+				if (helper && helper->Takes(*operation->state.shaders)) {
+					operation->resolved = helper->Resolve(operation->state, offsets, true);
+				} else {
+					operation->resolved = executor.ResolveDrawAhead(
+					    *operation->state.context, *operation->state.user_config,
+					    *operation->state.shaders, offsets, true, operation->state.context_id,
+					    operation->state.user_config_id);
+					if (helper) {
+						helper->Learn(*operation->state.shaders, operation->resolved);
+					}
+				}
 			}
 		} else if (operation->kind == GpuOperationKind::DispatchDirect ||
 		           operation->kind == GpuOperationKind::DispatchIndirect) {
@@ -593,6 +706,7 @@ void GuestGpu::ResolveThread() {
 		}
 		m_resolved.Push(std::move(*operation));
 	}
+	helper.reset();
 	m_resolved.Stop();
 }
 

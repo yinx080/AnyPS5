@@ -3776,6 +3776,10 @@ void PipelineCache::BeginExecuteThread() {
 }
 #endif
 
+bool PipelineCache::AheadGuestWritesPending() {
+	return !t_ahead_guest_writes.writes.empty();
+}
+
 uint64_t PipelineCache::AheadWritesSequence() {
 	return g_ahead_writes_sequence.load(std::memory_order_relaxed);
 }

@@ -219,9 +219,11 @@ enum class GpuStageThread : uint32_t {
 	Execution        = 1,
 	Recording        = 2,
 	Resolve          = 3,
-	HostCopy         = 4
+	HostCopy         = 4,
+	ResolveHelper    = 5
 };
 void ConfigureGpuStageThread(GpuStageThread stage);
+bool ResolveHelperEnabled();
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 bool RedZoneProtectionEnabled();
 #endif

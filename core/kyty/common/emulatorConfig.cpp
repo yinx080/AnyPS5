@@ -323,15 +323,23 @@ uint32_t ParseGpuPipelineStages(const char* value) {
 	return parsed == 1 ? GPU_PIPELINE_ALL : static_cast<uint32_t>(parsed) & GPU_PIPELINE_ALL;
 }
 
+bool ResolveHelperEnabled() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_RESOLVE_HELPER");
+		return value != nullptr && std::string_view(value) == "1";
+	}();
+	return enabled;
+}
+
 void ConfigureGpuStageThread(GpuStageThread stage) {
-	static const std::array<int, 5> cpus = [] {
-		std::array<int, 5> result {4, 6, 8, 10, 2};
+	static const std::array<int, 6> cpus = [] {
+		std::array<int, 6> result {4, 6, 8, 10, 2, 0};
 		const char*        value = std::getenv("KYTY_GPU_THREAD_CPUS");
 		if (value == nullptr) {
 			return result;
 		}
 		if (std::string_view(value) == "off") {
-			return std::array<int, 5> {-1, -1, -1, -1, -1};
+			return std::array<int, 6> {-1, -1, -1, -1, -1, -1};
 		}
 		for (auto& cpu: result) {
 			if (*value == '\0') {
@@ -359,7 +367,7 @@ void ConfigureGpuStageThread(GpuStageThread stage) {
 #endif
 	static std::once_flag reserved;
 	std::call_once(reserved, [] {
-		Common::Thread::ReserveCores(std::span {cpus});
+		Common::Thread::ReserveCores(std::span {cpus}.first(ResolveHelperEnabled() ? 6 : 5));
 	});
 	Common::Thread::PinCurrent(cpus[static_cast<uint32_t>(stage)]);
 }

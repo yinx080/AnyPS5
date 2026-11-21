@@ -430,6 +430,7 @@ public:
 	                                std::span<const uint32_t> data, bool one_address);
 	static void RetireAheadGuestWrites(uint64_t executed);
 	[[nodiscard]] static uint64_t AheadWritesSequence();
+	[[nodiscard]] static bool AheadGuestWritesPending();
 	static void SyncAheadWrites(uint64_t sequence);
 	static void BeginAheadThread(uint32_t slot);
 #if defined(ANYPS5_KYTY)
