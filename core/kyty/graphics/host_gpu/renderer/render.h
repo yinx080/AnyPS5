@@ -230,6 +230,9 @@ public:
 		m_resolved_draw = resolved != nullptr ? WaitResolvedDraw(resolved) : nullptr;
 	}
 	static ResolvedDraw* WaitResolvedDraw(ResolvedDraw* resolved) noexcept;
+#if defined(ANYPS5_KYTY)
+	static void PrefetchResolvedDraw(const ResolvedDraw* resolved, bool records) noexcept;
+#endif
 	static void ReleaseResolvedDraw(ResolvedDraw* resolved) noexcept;
 	[[nodiscard]] static bool ResolvedDrawWritesBuffers(const ResolvedDraw& resolved);
 	void UseContextId(uint64_t context_id, uint64_t user_config_id = 0) noexcept {

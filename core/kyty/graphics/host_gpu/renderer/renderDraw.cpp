@@ -717,6 +717,28 @@ RenderExecutor::ResolvedDraw* RenderExecutor::WaitResolvedDraw(ResolvedDraw* res
 	return state == ResolvedDraw::Ready ? resolved : nullptr;
 }
 
+#if defined(ANYPS5_KYTY)
+void RenderExecutor::PrefetchResolvedDraw(const ResolvedDraw* resolved, bool records) noexcept {
+	if (resolved->state.load(std::memory_order_acquire) != ResolvedDraw::Ready) {
+		return;
+	}
+	const auto& programs = resolved->programs;
+	if (!records) {
+		programs.reads.PrefetchGuest();
+		return;
+	}
+	programs.reads.PrefetchRecords();
+	for (uint32_t i = 0; i < programs.stages && i < ProgramResolution::MaxStages; i++) {
+		const auto& buffers = programs.resources[i].buffers;
+		const auto* p       = reinterpret_cast<const char*>(buffers.data());
+		const auto  bytes   = std::min<size_t>(buffers.size() * sizeof(buffers[0]), 1024);
+		for (size_t offset = 0; offset < bytes; offset += 64) {
+			__builtin_prefetch(p + offset);
+		}
+	}
+}
+
+#endif
 struct RenderExecutor::RenderTargetMemo {
 	struct MetadataEpoch {
 		GuestRange range;
